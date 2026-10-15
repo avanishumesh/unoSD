@@ -315,6 +315,38 @@ def select_action(observation: dict[str, Any],
         return str(legal[0]["action_id"]), agent_state
 
     if phase == "AFTER_DRAW":
+        # Keeping a newly drawn Wild Draw Four can be better than spending it
+        # immediately when the hand is still large and no opponent is close to
+        # finishing. Retain the card as a future guaranteed play. The engine
+        # explicitly allows keeping a playable drawn card in this phase.
+        drawn_ref = observation.get("drawn_card_ref")
+        drawn_card = next((card for card in hand
+                           if card.get("card_ref") == drawn_ref), None)
+        drawn_wdf_is_playable = any(
+            action.get("type") == "play" and action.get("card_ref") == drawn_ref
+            and _card_kind(action) == "wild_draw_four"
+            for action in legal
+        )
+        if (drawn_card is not None
+                and drawn_card.get("kind") == "wild_draw_four"
+                and drawn_wdf_is_playable
+                and len(hand) >= 5):
+            sizes = observation.get("hand_sizes")
+            if not isinstance(sizes, list):
+                sizes = []
+            seat = observation.get("seat")
+            finished = {value for value in (observation.get("finished_order") or [])
+                        if isinstance(value, int)}
+            opponent_threat = any(
+                index != seat and index not in finished
+                and isinstance(size, int) and size <= 2
+                for index, size in enumerate(sizes)
+            )
+            keep = next((action for action in legal
+                         if action.get("type") == "keep"), None)
+            if not opponent_threat and keep is not None:
+                return str(keep["action_id"]), agent_state
+
         plays = [action for action in legal if action.get("type") == "play"]
         if plays:
             # Only the newly drawn card is playable in this phase. Score color

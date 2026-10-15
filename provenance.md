@@ -3,9 +3,9 @@
 Fill this in before submitting. Organizers use it to check licensing and
 model-use policy; it ships inside your submission archive.
 
-- Team: Carrot
+- Team: TECHTEAM10650
 - Repository: https://github.com/avanishumesh/unoSD.git
-- Commit SHA: _full commit SHA you submitted_
+- Commit SHA: Pending final commit; replace with the full SHA after committing the submission files.
 - Language / framework: Python (standard library only)
 - Third-party libraries: none
 - Pretrained models / weights: none
