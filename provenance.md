@@ -5,7 +5,7 @@ model-use policy; it ships inside your submission archive.
 
 - Team: TECHTEAM10650
 - Repository: https://github.com/avanishumesh/unoSD.git
-- Commit SHA: Pending final commit; replace with the full SHA after committing the submission files.
+- Commit SHA: 234584c5434e1d7d8d5a6e01a1ccb589068e6c11
 - Language / framework: Python (standard library only)
 - Third-party libraries: none
 - Pretrained models / weights: none
