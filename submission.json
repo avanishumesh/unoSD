@@ -1,10 +1,7 @@
 {
   "game": "triad-uno-v1",
   "protocol_version": "1.0",
-  "entrypoint": [
-    "python",
-    "src/agent.py"
-  ],
+  "entrypoint": ["python", "src/agent.py"],
   "execution": "cpu",
   "language": "python",
   "models": [],
@@ -18,5 +15,6 @@
     "scratch_bytes": 1073741824,
     "max_processes": 128,
     "gpu_bytes": 0
-  }
+  },
+  "teamName": "TECHTEAM10650"
 }

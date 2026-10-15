@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -21,6 +22,14 @@ sys.path.insert(0, str(ROOT / "local_evaluator" / "src"))
 
 from triad_uno import engine, scoring, simulator  # noqa: E402
 from triad_uno.baselines import HeuristicAgent, RandomAgent  # noqa: E402
+
+OPPONENTS = ("heuristic", "random", "first_legal", "projection", "attack_greedy")
+KIND_RANK = {
+    "number": 0, "skip": 1, "reverse": 2, "draw_two": 3,
+    "wild": 4, "wild_draw_four": 5, "draw": 6, "keep": 7,
+    "choose_color": 8,
+}
+COLOR_RANK = {color: index for index, color in enumerate(("red", "yellow", "green", "blue"))}
 
 
 def load_strategy() -> Any:
@@ -54,11 +63,80 @@ class FirstLegalAgent:
         return str(legal[0]["action_id"]) if legal else "a0"
 
 
+class ProjectionAgent:
+    """Match the bundled weak projection-scoring example without torch."""
+
+    def __init__(self) -> None:
+        rng = random.Random(1234)
+        self.projection = [
+            [rng.uniform(-1.0, 1.0) for _ in range(3)] for _ in range(4)
+        ]
+
+    @staticmethod
+    def encode(action: dict[str, Any]) -> list[float]:
+        card = action.get("card") or {}
+        kind = card.get("kind", action.get("type"))
+        color = action.get("color") or card.get("color")
+        value = card.get("value")
+        return [
+            float(KIND_RANK.get(str(kind), 0)),
+            float(COLOR_RANK.get(str(color), 0)),
+            float(value) if isinstance(value, int) else 0.0,
+        ]
+
+    def select(self, observation: dict[str, Any]) -> str:
+        legal = observation.get("legal_actions") or []
+        if not legal:
+            return "a0"
+        def score(action: dict[str, Any]) -> float:
+            values = self.encode(action)
+            return sum(max(0.0, sum(x * w for x, w in zip(values, row)))
+                       for row in self.projection)
+        best = max(legal, key=score)
+        return str(best["action_id"])
+
+
+class AttackGreedyAgent:
+    """A weak high-card/attack-first policy often seen in quick bot drafts."""
+
+    def select(self, observation: dict[str, Any]) -> str:
+        legal = observation.get("legal_actions") or []
+        if not legal:
+            return "a0"
+        hand = observation.get("hand") or []
+        counts = {color: 0 for color in COLOR_RANK}
+        for card in hand:
+            if card.get("color") in counts:
+                counts[card["color"]] += 1
+        if observation.get("phase") == "CHOOSE_INITIAL_COLOR":
+            color = max(counts, key=counts.get)
+            return str(next((a["action_id"] for a in legal if a.get("color") == color),
+                            legal[0]["action_id"]))
+        plays = [a for a in legal if a.get("type") == "play"]
+        if not plays:
+            return str(legal[0]["action_id"])
+        def score(action: dict[str, Any]) -> tuple[int, int]:
+            card = action.get("card") or {}
+            kind = card.get("kind")
+            points = card.get("value", 0) if kind == "number" else {
+                "skip": 20, "reverse": 20, "draw_two": 20,
+                "wild": 50, "wild_draw_four": 50,
+            }.get(kind, 0)
+            attack = {"draw_two": 3, "wild_draw_four": 4,
+                      "skip": 2, "reverse": 1}.get(kind, 0)
+            return points + attack * 6, counts.get(action.get("color") or card.get("color"), 0)
+        return str(max(plays, key=score)["action_id"])
+
+
 def make_opponent(kind: str, seed: int) -> Any:
     if kind == "random":
         return RandomAgent(seed)
     if kind == "first_legal":
         return FirstLegalAgent()
+    if kind == "projection":
+        return ProjectionAgent()
+    if kind == "attack_greedy":
+        return AttackGreedyAgent()
     return HeuristicAgent(seed)
 
 
@@ -93,7 +171,7 @@ def play_batch(strategy: Any, parameters: dict[str, float] | None,
     wins = 0
     wild_plays = 0
     exposure = {name: {"candidate_points": 0.0, "games": 0}
-                 for name in ("heuristic", "random", "first_legal")}
+                 for name in OPPONENTS}
     for index in range(games):
         # Evaluate every candidate in all four seats on each exact game seed.
         # This pairs the random deal and avoids correlating seat with seed.
@@ -108,7 +186,7 @@ def play_batch(strategy: Any, parameters: dict[str, float] | None,
                 seat_kinds.append(None)
                 continue
             if profile == "mixed":
-                kind = ("heuristic", "random", "first_legal")[(index + seat + first_seed) % 3]
+                kind = OPPONENTS[(index + seat + first_seed) % len(OPPONENTS)]
             else:
                 kind = profile
             seat_kinds.append(kind)
@@ -151,23 +229,33 @@ def play_batch(strategy: Any, parameters: dict[str, float] | None,
     return result
 
 
+def save_checkpoint(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically save progress so a long training run can resume safely."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def main() -> int:
     """Run a seeded random search, then validate the strongest candidates."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--candidates", type=int, default=24)
-    parser.add_argument("--games", type=int, default=100,
+    parser.add_argument("--candidates", type=int, default=48)
+    parser.add_argument("--games", type=int, default=800,
                         help="training games per parameter set; use a multiple of four")
-    parser.add_argument("--validation-games", type=int, default=400,
+    parser.add_argument("--validation-games", type=int, default=1600,
                         help="fresh games for each finalist; use a multiple of four")
-    parser.add_argument("--top", type=int, default=3)
+    parser.add_argument("--top", type=int, default=5)
     parser.add_argument("--seed", type=int, default=10000)
     parser.add_argument("--search-seed", type=int, default=20261014)
-    parser.add_argument("--profile", choices=("mixed", "heuristic", "random", "first_legal"),
-                        default="mixed", help="opponents to optimize against")
+    parser.add_argument("--profile", choices=("mixed", *OPPONENTS),
+                        default="mixed", help="opponent archetype to optimize against")
     parser.add_argument("--wild-risk-scale", type=float, default=1.0,
                         help="scale Wild and Wild Draw Four penalties; below 1 is riskier")
     parser.add_argument("--params-file", type=Path,
                         help="evaluate these weights instead of searching (use --candidates 1)")
+    parser.add_argument("--checkpoint-file", type=Path,
+                        help="save each completed candidate and resume matching runs")
     args = parser.parse_args()
     if min(args.candidates, args.games, args.validation_games, args.top) < 1:
         parser.error("candidate, game, and finalist counts must be positive")
@@ -175,6 +263,30 @@ def main() -> int:
         parser.error("games and validation-games must be multiples of four for seat rotation")
     if args.params_file is not None and args.candidates != 1:
         parser.error("--params-file requires --candidates 1")
+
+    config = {
+        "candidates": args.candidates,
+        "games": args.games,
+        "validation_games": args.validation_games,
+        "top": args.top,
+        "seed": args.seed,
+        "search_seed": args.search_seed,
+        "profile": args.profile,
+        "wild_risk_scale": args.wild_risk_scale,
+        "params_file": str(args.params_file) if args.params_file else None,
+    }
+    checkpoint: dict[str, Any] = {
+        "config": config,
+        "results": [],
+        "reference": None,
+        "validated": [],
+    }
+    if args.checkpoint_file is not None and args.checkpoint_file.exists():
+        checkpoint = json.loads(args.checkpoint_file.read_text(encoding="utf-8"))
+        if checkpoint.get("config") != config:
+            parser.error("checkpoint configuration does not match this run")
+    elif args.checkpoint_file is not None:
+        save_checkpoint(args.checkpoint_file, checkpoint)
 
     strategy = load_strategy()
     original_params = dict(strategy.PARAMS)
@@ -186,30 +298,53 @@ def main() -> int:
         candidates[0]["wild_penalty"] *= args.wild_risk_scale
         candidates[0]["wild_draw_four_penalty"] *= args.wild_risk_scale
         candidates.extend(sample_parameters(rng) for _ in range(args.candidates - 1))
-    train_results = []
-    for index, params in enumerate(candidates):
+    train_results = list(checkpoint.get("results", []))
+    if len(train_results) > len(candidates):
+        parser.error("checkpoint contains more candidates than this run")
+    for index in range(len(train_results), len(candidates)):
+        params = candidates[index]
         score = play_batch(strategy, params, args.games, args.seed, args.profile)
         train_results.append({"training": score, "parameters": params})
-        print(json.dumps({"candidate": index, **score}))
-    train_results.sort(key=lambda row: row["training"]["average_points"], reverse=True)
+        checkpoint["results"] = train_results
+        if args.checkpoint_file is not None:
+            save_checkpoint(args.checkpoint_file, checkpoint)
+        if (index + 1) % 10 == 0 or index + 1 == len(candidates):
+            print(json.dumps({"training_progress": index + 1,
+                              "of": len(candidates),
+                              "best_points_so_far": max(
+                                  row["training"]["average_points"]
+                                  for row in train_results)}), flush=True)
+    train_results.sort(key=lambda row: (
+        row["training"]["average_points"], row["training"]["first_places"]
+    ), reverse=True)
 
     validation_seed = args.seed + 1_000_000
-    reference = play_batch(strategy, original_params, args.validation_games, validation_seed,
-                           args.profile)
+    reference = checkpoint.get("reference")
+    if reference is None:
+        reference = play_batch(strategy, original_params, args.validation_games,
+                               validation_seed, args.profile)
+        checkpoint["reference"] = reference
+        if args.checkpoint_file is not None:
+            save_checkpoint(args.checkpoint_file, checkpoint)
     print(json.dumps({"reference_current_policy_same_seeds": reference,
-                      "profile": args.profile}))
+                      "profile": args.profile}), flush=True)
     finalists = train_results[:min(args.top, len(train_results))]
-    validated = []
+    validated = list(checkpoint.get("validated", []))
     for rank, row in enumerate(finalists, start=1):
+        if rank <= len(validated):
+            continue
         score = play_batch(strategy, row["parameters"], args.validation_games,
                            validation_seed, args.profile)
         result = {"rank": rank, "validation": score,
                   "parameters": row["parameters"]}
         validated.append(result)
-        print(json.dumps(result))
+        checkpoint["validated"] = validated
+        if args.checkpoint_file is not None:
+            save_checkpoint(args.checkpoint_file, checkpoint)
+        print(json.dumps(result), flush=True)
 
     best = max(validated, key=lambda row: row["validation"]["average_points"])
-    print(json.dumps({"selected": best}, indent=2))
+    print(json.dumps({"selected": best}, indent=2), flush=True)
     return 0
 
 
